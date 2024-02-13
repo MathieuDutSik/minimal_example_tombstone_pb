@@ -1,6 +1,8 @@
 use bcs::serialize_into;
 use scylla::query::Query;
 use scylla::{IntoTypedRows, Session, SessionBuilder};
+use rand::SeedableRng;
+use rand::Rng;
 
 fn get_upper_bound_option(key_prefix: &[u8]) -> Option<Vec<u8>> {
     let len = key_prefix.len();
@@ -16,6 +18,7 @@ fn get_upper_bound_option(key_prefix: &[u8]) -> Option<Vec<u8>> {
 }
 
 async fn find_keys_by_prefix(session: &Session, key_prefix: Vec<u8>) -> Vec<Vec<u8>> {
+    let mut keys = Vec::new();
     let len = key_prefix.len();
     let rows = match get_upper_bound_option(&key_prefix) {
         None => {
@@ -30,7 +33,6 @@ async fn find_keys_by_prefix(session: &Session, key_prefix: Vec<u8>) -> Vec<Vec<
             session.query(query, values).await.unwrap()
         }
     };
-    let mut keys = Vec::new();
     if let Some(rows) = rows.rows {
         for row in rows.into_typed::<(Vec<u8>,)>() {
             let key = row.unwrap();
@@ -42,20 +44,33 @@ async fn find_keys_by_prefix(session: &Session, key_prefix: Vec<u8>) -> Vec<Vec<
 }
 
 async fn write_batch(session: &Session, n: usize) {
-    let mut batch_query =
+    let mut rng = rand::rngs::StdRng::seed_from_u64(2);
+    let mut batch_insert_query =
         scylla::statement::batch::Batch::new(scylla::frame::request::batch::BatchType::Logged);
-    let mut batch_values = Vec::new();
+    let mut batch_insert_values = Vec::new();
+    let mut batch_delete_query =
+        scylla::statement::batch::Batch::new(scylla::frame::request::batch::BatchType::Logged);
+    let mut batch_delete_values = Vec::new();
     for i in 0..n {
         let mut key = vec![0];
         serialize_into(&mut key, &(i as usize)).unwrap();
         let value = key.clone();
         let query = "INSERT INTO kv.pairs (dummy, k, v) VALUES (0, ?, ?)";
-        let values = vec![key, value];
-        batch_values.push(values);
+        let values = vec![key.clone(), value];
         let query = Query::new(query);
-        batch_query.append_statement(query);
+        batch_insert_values.push(values);
+        batch_insert_query.append_statement(query);
+        let delete = rng.gen::<bool>();
+        if delete {
+            let values = vec![key];
+            let query = "DELETE FROM kv.pairs WHERE dummy = 0 AND k = ?";
+            let query = Query::new(query);
+            batch_delete_values.push(values);
+            batch_delete_query.append_statement(query);
+        }
     }
-    session.batch(&batch_query, batch_values).await.unwrap();
+    session.batch(&batch_insert_query, batch_insert_values).await.unwrap();
+    session.batch(&batch_delete_query, batch_delete_values).await.unwrap();
 }
 
 async fn create_test_session() -> Session {
